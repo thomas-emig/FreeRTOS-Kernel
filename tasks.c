@@ -368,7 +368,7 @@ PRIVILEGED_DATA static volatile UBaseType_t uxCurrentNumberOfTasks 	= ( UBaseTyp
 PRIVILEGED_DATA static volatile TickType_t xTickCount 				= ( TickType_t ) configINITIAL_TICK_COUNT;
 PRIVILEGED_DATA static volatile UBaseType_t uxTopReadyPriority 		= tskIDLE_PRIORITY;
 PRIVILEGED_DATA static volatile BaseType_t xSchedulerRunning 		= pdFALSE;
-PRIVILEGED_DATA static volatile TickType_t xPendedTicks 			= ( TickType_t ) 0U;
+PRIVILEGED_DATA static volatile UBaseType_t uxPendedTicks 			= ( UBaseType_t ) 0U;
 PRIVILEGED_DATA static volatile BaseType_t xYieldPending 			= pdFALSE;
 PRIVILEGED_DATA static volatile BaseType_t xNumOfOverflows 			= ( BaseType_t ) 0;
 PRIVILEGED_DATA static UBaseType_t uxTaskNumber 					= ( UBaseType_t ) 0U;
@@ -1164,7 +1164,7 @@ static void prvAddNewTaskToReadyList( TCB_t *pxNewTCB )
 			being deleted. */
 			pxTCB = prvGetTCBFromHandle( xTaskToDelete );
 
-			/* Remove task from the ready/delayed list. */
+			/* Remove task from the ready list. */
 			if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
 			{
 				taskRESET_READY_PRIORITY( pxTCB->uxPriority );
@@ -2175,7 +2175,6 @@ BaseType_t xTaskResumeAll( void )
 {
 TCB_t *pxTCB = NULL;
 BaseType_t xAlreadyYielded = pdFALSE;
-TickType_t xTicksToNextUnblockTime;
 
 	/* If uxSchedulerSuspended is zero then this function does not match a
 	previous call to vTaskSuspendAll(). */
@@ -2230,51 +2229,30 @@ TickType_t xTicksToNextUnblockTime;
 				they should be processed now.  This ensures the tick count does
 				not	slip, and that any delayed tasks are resumed at the correct
 				time. */
-				while( xPendedTicks > ( TickType_t ) 0 )
 				{
-					/* Calculate how far into the future the next task will
-					leave the Blocked state because its timeout expired.  If
-					there are no tasks due to leave	the blocked state between
-					the time now and the time at which the tick count overflows
-					then xNextTaskUnblockTime will the tick overflow time.
-					This means xNextTaskUnblockTime can never be less than
-					xTickCount, and the following can therefore not
-					underflow. */
-					configASSERT( xNextTaskUnblockTime >= xTickCount );
-					xTicksToNextUnblockTime = xNextTaskUnblockTime - xTickCount;
+					UBaseType_t uxPendedCounts = uxPendedTicks; /* Non-volatile copy. */
 
-					/* Don't want to move the tick count more than the number
-					of ticks that are pending, so cap if necessary. */
-					if( xTicksToNextUnblockTime > xPendedTicks )
+					if( uxPendedCounts > ( UBaseType_t ) 0U )
 					{
-						xTicksToNextUnblockTime = xPendedTicks;
-					}
+						do
+						{
+							if( xTaskIncrementTick() != pdFALSE )
+							{
+								xYieldPending = pdTRUE;
+							}
+							else
+							{
+								mtCOVERAGE_TEST_MARKER();
+							}
+							--uxPendedCounts;
+						} while( uxPendedCounts > ( UBaseType_t ) 0U );
 
-					if( xTicksToNextUnblockTime == 0 )
-					{
-						/* xTicksToNextUnblockTime could be zero if the tick
-						count is about to overflow and xTicksToNetUnblockTime
-						holds the time at which the tick count will overflow
-						(rather than the time at which the next task will
-						unblock).  Set to 1 otherwise xPendedTicks won't be
-						decremented below. */
-						xTicksToNextUnblockTime = ( TickType_t ) 1;
+						uxPendedTicks = 0;
 					}
-					else if( xTicksToNextUnblockTime > ( TickType_t ) 1 )
+					else
 					{
-						/* Move the tick count one short of the next unblock
-						time, then call xTaskIncrementTick() to move the tick
-						count up to the next unblock time to unblock the task,
-						if any.  This will also swap the blocked task and
-						overflow blocked task lists if necessary. */
-						xTickCount += ( xTicksToNextUnblockTime - ( TickType_t ) 1 );
+						mtCOVERAGE_TEST_MARKER();
 					}
-					xYieldPending |= xTaskIncrementTick();
-
-					/* Adjust for the number of ticks just added to
-					xTickCount and go around the loop again if
-					xTicksToCatchUp is still greater than 0. */
-					xPendedTicks -= xTicksToNextUnblockTime;
 				}
 
 				if( xYieldPending != pdFALSE )
@@ -2608,24 +2586,6 @@ implementations require configUSE_TICKLESS_IDLE to be set to a value other than
 #endif /* configUSE_TICKLESS_IDLE */
 /*----------------------------------------------------------*/
 
-BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
-{
-BaseType_t xYieldRequired = pdFALSE;
-
-	/* Must not be called with the scheduler suspended as the implementation
-	relies on xPendedTicks being wound down to 0 in xTaskResumeAll(). */
-	configASSERT( uxSchedulerSuspended == 0 );
-
-	/* Use xPendedTicks to mimic xTicksToCatchUp number of ticks occuring when
-	the scheduler is suspended so the ticks are executed in xTaskResumeAll(). */
-	vTaskSuspendAll();
-	xPendedTicks += xTicksToCatchUp;
-	xYieldRequired = xTaskResumeAll();
-
-	return xYieldRequired;
-}
-/*----------------------------------------------------------*/
-
 #if ( INCLUDE_xTaskAbortDelay == 1 )
 
 	BaseType_t xTaskAbortDelay( TaskHandle_t xTask )
@@ -2833,7 +2793,7 @@ BaseType_t xSwitchRequired = pdFALSE;
 		{
 			/* Guard against the tick hook being called when the pended tick
 			count is being unwound (when the scheduler is being unlocked). */
-			if( xPendedTicks == ( TickType_t ) 0 )
+			if( uxPendedTicks == ( UBaseType_t ) 0U )
 			{
 				vApplicationTickHook();
 			}
@@ -2846,7 +2806,7 @@ BaseType_t xSwitchRequired = pdFALSE;
 	}
 	else
 	{
-		++xPendedTicks;
+		++uxPendedTicks;
 
 		/* The tick hook gets called at regular intervals, even if the
 		scheduler is locked. */
@@ -4021,10 +3981,7 @@ TCB_t *pxTCB;
 				{
 					if( uxListRemove( &( pxMutexHolderTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
 					{
-						/* It is known that the task is in its ready list so
-						there is no need to check again and the port level
-						reset macro can be called directly. */
-						portRESET_READY_PRIORITY( pxMutexHolderTCB->uxPriority, uxTopReadyPriority );
+						taskRESET_READY_PRIORITY( pxMutexHolderTCB->uxPriority );
 					}
 					else
 					{
@@ -4104,7 +4061,7 @@ TCB_t *pxTCB;
 					the mutex.  If the mutex is held by a task then it cannot be
 					given from an interrupt, and if a mutex is given by the
 					holding task then it must be the running state task.  Remove
-					the holding task from the ready/delayed list. */
+					the holding task from the ready list. */
 					if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
 					{
 						taskRESET_READY_PRIORITY( pxTCB->uxPriority );
@@ -4225,10 +4182,7 @@ TCB_t *pxTCB;
 					{
 						if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
 						{
-							/* It is known that the task is in its ready list so
-							there is no need to check again and the port level
-							reset macro can be called directly. */
-							portRESET_READY_PRIORITY( pxTCB->uxPriority, uxTopReadyPriority );
+							taskRESET_READY_PRIORITY( pxTCB->uxPriority );
 						}
 						else
 						{
@@ -5117,12 +5071,10 @@ TickType_t uxReturn;
 /*-----------------------------------------------------------*/
 
 #if( ( configGENERATE_RUN_TIME_STATS == 1 ) && ( INCLUDE_xTaskGetIdleTaskHandle == 1 ) )
-
-	uint32_t ulTaskGetIdleRunTimeCounter( void )
+	TickType_t xTaskGetIdleRunTimeCounter( void )
 	{
 		return xIdleTaskHandle->ulRunTimeCounter;
 	}
-
 #endif
 /*-----------------------------------------------------------*/
 
